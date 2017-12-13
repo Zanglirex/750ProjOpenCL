@@ -184,7 +184,7 @@ int md5crypt_parse_hash(u8 *input_buf, u32 input_len, hash_t *hash_buf)
 
 		salt_pos[0] = 0x0;
 
-		salt->salt_iter = atoll((const char *)(salt_pos - iterations_len));
+		salt->salt_iter = (u32)atoll((const char *)(salt_pos - iterations_len));
 
 		salt_pos += 1;
 
@@ -201,7 +201,7 @@ int md5crypt_parse_hash(u8 *input_buf, u32 input_len, hash_t *hash_buf)
 
 	if (hash_pos == NULL) return -9; // (PARSER_SEPARATOR_UNMATCHED);
 
-	u32 salt_len = hash_pos - salt_pos;
+	u32 salt_len = (u32)(hash_pos - salt_pos);
 
 	if (salt_len > 8) return -8; // (PARSER_SALT_LENGTH);
 

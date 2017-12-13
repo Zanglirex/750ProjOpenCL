@@ -127,11 +127,13 @@ int find_hash(const u32 digest[4], const u32 digests_cnt, __global const digest_
 	return (-1);
 }
 
+//need
 u32 check_bitmap(__global const u32 *bitmap, const u32 bitmap_mask, const u32 bitmap_shift, const u32 digest)
 {
 	return (bitmap[(digest >> bitmap_shift) & bitmap_mask] & (1 << (digest & 0x1f)));
 }
 
+// need
 u32 check(const u32 digest[4], __global const u32 *bitmap_s1_a, __global const u32 *bitmap_s1_b, __global const u32 *bitmap_s1_c, __global const u32 *bitmap_s1_d, __global const u32 *bitmap_s2_a, __global const u32 *bitmap_s2_b, __global const u32 *bitmap_s2_c, __global const u32 *bitmap_s2_d, const u32 bitmap_mask, const u32 bitmap_shift1, const u32 bitmap_shift2)
 {
 	if (check_bitmap(bitmap_s1_a, bitmap_mask, bitmap_shift1, digest[0]) == 0) return (0);
@@ -147,6 +149,7 @@ u32 check(const u32 digest[4], __global const u32 *bitmap_s1_a, __global const u
 	return (1);
 }
 
+// need
 void mark_hash(__global plain_t *plains_buf, __global u32 *d_result, const u32 salt_pos, const u32 digests_cnt, const u32 digest_pos, const u32 hash_pos, const u32 gid, const u32 il_pos)
 {
 	const u32 idx = atomic_inc(d_result);
@@ -32464,6 +32467,7 @@ void undo_utf16le_S(const u32 in1[4], const u32 in2[4], u32 out[4])
 #endif
 }
 
+//need
 void switch_buffer_by_offset_le_S(u32 w0[4], u32 w1[4], u32 w2[4], u32 w3[4], const u32 offset)
 {
 	const int offset_mod_4 = offset & 3;
@@ -33170,6 +33174,7 @@ void switch_buffer_by_offset_le_S(u32 w0[4], u32 w1[4], u32 w2[4], u32 w3[4], co
 #endif
 }
 
+//need
 void switch_buffer_by_offset_carry_le_S(u32 w0[4], u32 w1[4], u32 w2[4], u32 w3[4], u32 c0[4], u32 c1[4], u32 c2[4], u32 c3[4], const u32 offset)
 {
 	const int offset_mod_4 = offset & 3;

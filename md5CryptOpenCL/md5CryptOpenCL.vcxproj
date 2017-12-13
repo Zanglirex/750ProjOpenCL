@@ -147,10 +147,12 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <Text Include="hashes.txt" />
     <Text Include="ReadMe.txt" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="bitmap.h" />
+    <ClInclude Include="clinfo.h" />
     <ClInclude Include="ext_OpenCL.h" />
     <ClInclude Include="inc_hash_constants.h" />
     <ClInclude Include="md5_funcs.h" />
@@ -160,6 +162,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="bitmap.cpp" />
+    <ClCompile Include="clinfo.cpp" />
     <ClCompile Include="md5CryptOpenCL.cpp" />
     <ClCompile Include="md5_funcs.cpp" />
     <ClCompile Include="stdafx.cpp">

@@ -5,9 +5,12 @@
 #include "types.h"
 #include "md5_funcs.h"
 #include "bitmap.h"
+#include "clinfo.h"
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <iostream>
+#include <string>
 
 #ifdef __APPLE__
 #include <OpenCL/opencl.h>
@@ -19,13 +22,16 @@
 	#define OS_Windows 0
 	#define MAX_PATH 260
 	#include <unistd.h>
+	#include <ifstream>
 #elif defined(_WIN32) || defined(WIN32)
 	#define OS_Windows 1
 	#include <Windows.h>
+	#include <fstream>
+	using namespace std;
 #endif
 
 #define MAX_SOURCE_SIZE (0x100000)
-
+#define MIN(a,b) (((a) < (b)) ? (a) : (b))
 
 void get_cur_path(char* pwd) {
 	#ifdef __unix__
@@ -35,6 +41,31 @@ void get_cur_path(char* pwd) {
 		GetCurrentDirectory(sizeof(temp_pwd), temp_pwd);
 		snprintf(pwd, sizeof(temp_pwd) - 1, "%ws", temp_pwd);
 	#endif
+}
+
+static int get_kernel_threads(hc_md5_device_param_t *md5_controller, cl_kernel kernel, u32 *result)
+{
+	int CL_rc;
+	size_t work_group_size;
+	size_t compile_work_group_size[3];
+	u32 kernel_threads = md5_controller->kernel_threads_by_user;
+
+	CL_rc = clGetKernelWorkGroupInfo(kernel, md5_controller->device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(work_group_size), &work_group_size, NULL);
+	if (CL_rc == -1) return -1;
+
+	CL_rc = clGetKernelWorkGroupInfo(kernel, md5_controller->device, CL_KERNEL_COMPILE_WORK_GROUP_SIZE, sizeof(compile_work_group_size), &compile_work_group_size, NULL);
+	if (CL_rc == -1) return -1;
+
+	if (work_group_size > 0){
+		kernel_threads = (u32)MIN(kernel_threads, work_group_size);
+	}
+
+	if (compile_work_group_size[0] > 0){
+		kernel_threads = (u32)MIN(kernel_threads, compile_work_group_size[0]);
+	}
+
+	*result = kernel_threads;
+	return 0;
 }
 
 const char *getErrorString(cl_int error)
@@ -127,10 +158,61 @@ void load_md5_hashconfig(hashconfig_t * md5_hashconfig) {
 	md5_hashconfig->dgst_pos1 = 1;
 	md5_hashconfig->dgst_pos2 = 2;
 	md5_hashconfig->dgst_pos3 = 3;
-	md5_hashconfig->st_hash = "$1$38652870$DUjsu4TTlTsOe/xxZ05uf/"; //ST_HASH_00500;
-	md5_hashconfig->st_pass = "hashcat";//ST_PASS_HASHCAT_PLAIN;
+	// this is a password + hash mix that can be tested
+	//md5_hashconfig->st_hash = "$1$38652870$DUjsu4TTlTsOe/xxZ05uf/"; //ST_HASH_00500;
+	//md5_hashconfig->st_pass = "hashcat";//ST_PASS_HASHCAT_PLAIN;
 	md5_hashconfig->tmp_size = sizeof(md5crypt_tmp_t);
 	md5_hashconfig->pw_max = 15;
+	md5_hashconfig->is_salted = true;
+}
+
+void setup_device(hc_md5_device_param_t* md5_controller) {
+	cl_uint vector_width;
+	cl_int ret;
+
+	//processors on the device
+	cl_uint device_processors;
+	ret = clGetDeviceInfo(md5_controller->device, CL_DEVICE_MAX_COMPUTE_UNITS, sizeof(device_processors), &device_processors, NULL);
+	md5_controller->device_processors = device_processors;
+	
+	//vector width of the device
+	ret = clGetDeviceInfo(md5_controller->device, CL_DEVICE_NATIVE_VECTOR_WIDTH_LONG, sizeof(vector_width), &vector_width, NULL);
+	if (ret != 0) printf("ret at %d is %s\n", __LINE__, getErrorString(ret));
+	if (vector_width > 16) vector_width = 16;
+	md5_controller->vector_width = vector_width;
+
+	md5_controller->kernel_accel_min = 1;
+	md5_controller->kernel_accel_max = 1024;
+}
+
+int file_get_line(FILE *fp, char *line_buf){
+	int line_len = 0;
+
+	while (!feof(fp)){
+		const int c = fgetc(fp);
+
+		if (c == EOF) break;
+		line_buf[line_len] = (char)c;
+		line_len++;
+		if (line_len == 100) line_len--;
+		if (c == '\n') break;
+	}
+
+	if (line_len == 0) return 0;
+
+	while (line_len){
+		if (line_buf[line_len - 1] == '\n'){
+			line_len--;
+			continue;
+		}
+		if (line_buf[line_len - 1] == '\r'){
+			line_len--;
+			continue;
+		}
+		break;
+	}
+	line_buf[line_len] = 0;
+	return (line_len);
 }
 
 void load_kernel_source(char* filename, char* source_str, size_t* source_size) {
@@ -160,7 +242,7 @@ cl_int build_program(hc_md5_device_param_t* md5_controller, char* filename) {
 
 	//get platform with device info
 	cl_int ret = clGetPlatformIDs(0, NULL, &md5_controller->num_platforms);
-	printf("num_platforms = %d", md5_controller->num_platforms);
+	//printf("num_platforms = %d\n", md5_controller->num_platforms);
 	md5_controller->platforms = NULL;
 	md5_controller->platforms = (cl_platform_id*)malloc(md5_controller->num_platforms * sizeof(cl_platform_id));
 
@@ -205,30 +287,72 @@ cl_int build_program(hc_md5_device_param_t* md5_controller, char* filename) {
 	return 0;
 }
 
-void set_sizes(hc_md5_device_param_t* md5_controller, bitmap_ctx_t* bitmap, hashconfig_t* md5_hashconfig,hashes* md5_hashes) {
-	md5_hashes->digests_cnt = 1;
-	md5_hashes->salts_cnt = 1;
-	md5_hashes->digests_buf = md5_hashconfig->st_hash;
-	md5_hashes->hashes_buf = (hash_t*) calloc(1,sizeof(hash_t));
-	md5_hashes->hashes_buf->salt = (salt_t*)calloc(1, sizeof(salt_t));
-	md5_hashes->hashes_buf->digest = calloc(1,md5_hashconfig->dgst_size);
-	md5_hashes->digests_buf = md5_hashes->hashes_buf->digest;
-	md5_hashes->st_digests_buf = md5_hashes->hashes_buf->digest;
-	//TODO get digest for md5_hashes->hashes_buf
-	md5_hashconfig->parse_func((u8*)md5_hashconfig->st_hash, (u32)strlen(md5_hashconfig->st_hash), md5_hashes->hashes_buf);
-	md5_hashes->salts_buf = md5_hashes->hashes_buf->salt;
-
+void set_controller_sizes(hc_md5_device_param_t* md5_controller, hashconfig_t* md5_hashconfig, hashes_t* md5_hashes) {
 	md5_controller->size_pws = 4;
 	md5_controller->size_pws_amp = 4;
 	md5_controller->size_tmps = 4;
-	md5_controller->size_plains = (size_t) md5_hashes->digests_cnt * sizeof(plain_t);
+	md5_controller->size_plains = (size_t)md5_hashes->digests_cnt * sizeof(plain_t);
 	md5_controller->size_salts = (size_t)md5_hashes->salts_cnt * sizeof(salt_t);
 	md5_controller->size_shown = (size_t)md5_hashes->digests_cnt * sizeof(u32);
 	md5_controller->size_digests = (size_t)md5_hashes->digests_cnt * (size_t)md5_hashconfig->dgst_size;
 	md5_controller->size_results = sizeof(u32);
+}
 
-	bitmap_ctx_init(bitmap, md5_hashconfig, md5_hashes);
+void setup_hashes(hashconfig_t* md5_hashconfig,hashes_t* md5_hashes) {
+	u32 hashes_available = 0;
+	hash_t *hashes_buf = NULL;
+	void *digests_buf = NULL;
+	salt_t *salts_buf = NULL;
+	char* hashfile = "hashes.txt";
+	FILE * fp = NULL;
+	int ch = 0;
+	int line_num = 0;
+	char* line_buf = (char*) calloc(100, sizeof(char));
+	u32 hash_size = (u32)strlen("$1$38652870$DUjsu4TTlTsOe/xxZ05uf/"); //example hash
 
+	fopen_s(&fp, hashfile, "rb");
+	while (!feof(fp)) {
+		ch = fgetc(fp);
+		if (ch == '\n')
+		{
+			hashes_available++;
+		}
+	}
+	fclose(fp);
+	printf("Read %d hashes from %s\n", hashes_available, hashfile);
+	md5_hashes->hashes_cnt = hashes_available;
+	md5_hashes->digests_cnt = hashes_available;
+	md5_hashes->salts_cnt = hashes_available;
+
+
+	hashes_buf = (hash_t*)calloc(hashes_available, sizeof(hash_t));
+	digests_buf = calloc(hashes_available, md5_hashconfig->dgst_size);
+	salts_buf = (salt_t*)calloc(hashes_available, sizeof(salt_t));
+
+	for (u32 hash_pos = 0; hash_pos < hashes_available; hash_pos++) {
+		hashes_buf[hash_pos].digest = ((char*)digests_buf) + (hash_pos* md5_hashconfig->dgst_size);
+		hashes_buf[hash_pos].salt = &salts_buf[hash_pos];
+	}
+
+	md5_hashes->hashes_buf = hashes_buf;
+	md5_hashes->digests_buf = digests_buf;
+	md5_hashes->salts_buf = salts_buf;
+
+
+	fopen_s(&fp, hashfile, "rb");
+	while (!feof(fp)) {
+		int line_len = file_get_line(fp, line_buf);
+		if (line_len > 10) { //should be about 34 though
+			ch = md5_hashconfig->parse_func((u8*)line_buf, hash_size, &hashes_buf[line_num]);
+			if (ch != 0) printf("Something went wrong with the parsing function at line %d\n", __LINE__);
+		}
+		line_num++;
+	}
+	fclose(fp);
+
+	//md5_hashconfig->parse_func((u8*)md5_hashconfig->st_hash, (u32)strlen(md5_hashconfig->st_hash), md5_hashes->hashes_buf);
+
+	free(line_buf);
 }
 
 int createBuffers(hc_md5_device_param_t* md5_controller, bitmap_ctx_t* bitmap_ctx, hashes_t* md5_hashes) {
@@ -269,7 +393,7 @@ int createBuffers(hc_md5_device_param_t* md5_controller, bitmap_ctx_t* bitmap_ct
 	return 0;
 }
 
-void set_device_args(hc_md5_device_param_t* md5_controller, bitmap_ctx_t* bitmap) {
+void load_controller_arg_array(hc_md5_device_param_t* md5_controller, bitmap_ctx_t* bitmap) {
 	/**
 	* kernel args
 	*/
@@ -336,8 +460,141 @@ int set_kernel_args(hc_md5_device_param_t* md5_controller, cl_kernel* kernel) {
 	return 0;
 }
 
+void create_kernels(hc_md5_device_param_t* md5_controller) {
+	cl_int ret = 0;
+
+	// Create the OpenCL kernel
+	md5_controller->kernel1 = clCreateKernel(md5_controller->program, "m00500_init", &ret);
+	printf("ret at %d is %s\n", __LINE__, getErrorString(ret));
+	ret = get_kernel_threads(md5_controller, md5_controller->kernel1, &md5_controller->kernel_threads_by_wgs_kernel1);
+
+	md5_controller->kernel2 = clCreateKernel(md5_controller->program, "m00500_loop", &ret);
+	printf("ret at %d is %s\n", __LINE__, getErrorString(ret));
+	ret = get_kernel_threads(md5_controller, md5_controller->kernel2, &md5_controller->kernel_threads_by_wgs_kernel2);
+
+	md5_controller->kernel3 = clCreateKernel(md5_controller->program, "m00500_comp", &ret);
+	printf("ret at %d is %s\n", __LINE__, getErrorString(ret));
+	ret = get_kernel_threads(md5_controller, md5_controller->kernel3, &md5_controller->kernel_threads_by_wgs_kernel3);
+}
+
+void run_kernel(hc_md5_device_param_t* md5_controller, const u32 kern_run, const u64 num) {
+	u64 num_elements = num;
+	cl_kernel kernel = NULL;
+	u64 kernel_threads = 0;
+	cl_event event;
+
+	md5_controller->kernel_params_buf64[23] = num; // gid_max
+
+	switch (kern_run) {
+	case 1:
+		kernel = md5_controller->kernel1;
+		kernel_threads = md5_controller->kernel_threads_by_wgs_kernel1;
+		break;
+	case 2:
+		kernel = md5_controller->kernel2;
+		kernel_threads = md5_controller->kernel_threads_by_wgs_kernel2;
+		break;
+	case 3:
+		kernel = md5_controller->kernel3;
+		kernel_threads = md5_controller->kernel_threads_by_wgs_kernel3;
+		break;
+	}
+
+	while (num_elements % kernel_threads) num_elements++;
+
+	// Set the arguments of the kernel
+	cl_int ret = set_kernel_args(md5_controller, &(kernel));
+	if(ret != 0) printf("ret at %d is %s for kernel%d\n", __LINE__, getErrorString(ret), (int)kern_run);
+
+	const size_t global_work_size[3] = { num_elements,   1, 1 };
+	const size_t local_work_size[3] = { kernel_threads, 1, 1 };
+
+	ret = clEnqueueNDRangeKernel(md5_controller->command_queue, kernel, 1, NULL, global_work_size, local_work_size, 0, NULL, &event);
+	if (ret != 0) printf("ret at %d is %s for kernel%d\n", __LINE__, getErrorString(ret), (int)kern_run);
+
+	ret = clFlush(md5_controller->command_queue);
+	if (ret != 0) printf("ret at %d is %s for kernel%d\n", __LINE__, getErrorString(ret), (int)kern_run);
+
+	ret = clWaitForEvents(1, &event);
+	if (ret != 0) printf("ret at %d is %s for kernel%d\n", __LINE__, getErrorString(ret), (int)kern_run);
+
+	cl_ulong time_start;
+	cl_ulong time_end;
+
+	ret = clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_START, sizeof(time_start), &time_start, NULL);// if (ret == -1) return -1;
+	if (ret != 0) printf("ret at %d is %s for kernel%d\n", __LINE__, getErrorString(ret), (int)kern_run);
+
+	ret = clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_END, sizeof(time_end), &time_end, NULL);// if (ret == -1) return -1;
+	if (ret != 0) printf("ret at %d is %s for kernel%d\n", __LINE__, getErrorString(ret), (int)kern_run);
+
+	const double exec_us = (double)(time_end - time_start) / 1000;
+
+	clReleaseEvent(event);
+	if (ret != 0) printf("ret at %d is %s for kernel%d\n", __LINE__, getErrorString(ret), (int)kern_run);
+	clFinish(md5_controller->command_queue);
+	if (ret != 0) printf("ret at %d is %s for kernel%d\n", __LINE__, getErrorString(ret), (int)kern_run);
+}
+
+void execute(hc_md5_device_param_t* md5_controller, hashes_t* md5_hashes) {
+	//I think this only works for 1 right now
+	cl_int ret = 0;
+
+	run_kernel(md5_controller, 1, 1);
+
+	u32 salt_pos = 0;
+	salt_t* salt_buf = &md5_hashes->salts_buf[salt_pos];
+	u32 iter = salt_buf->salt_iter;
+	const u32 loop_step = 1;
+
+	for (u32 loop_pos = 0; loop_pos < iter; loop_pos += loop_step) {
+		u32 loop_left = iter - loop_pos;
+		md5_controller->kernel_params_buf32[28] = loop_pos;
+		md5_controller->kernel_params_buf32[29] = loop_left;
+		run_kernel(md5_controller, 2, 1);
+	}
+
+	run_kernel(md5_controller, 3, 1);
+
+	u32 num_cracked;
+
+	ret = clEnqueueReadBuffer(md5_controller->command_queue, md5_controller->d_return_buf, CL_TRUE, 0, sizeof(u32), &num_cracked, 0, NULL, NULL);
+	if (ret != 0) printf("ret at %d is %s\n", __LINE__, getErrorString(ret));
+
+	if (num_cracked) {
+		plain_t* cracked = (plain_t*) calloc(num_cracked, sizeof(plain_t));
+		ret = clEnqueueReadBuffer(md5_controller->command_queue, md5_controller->d_plain_bufs, CL_TRUE, 0, num_cracked * sizeof(plain_t), cracked, 0, NULL, NULL);
+		u32 cpt_cracked = 0;
+
+		for (u32 i = 0; i < num_cracked; i++)
+		{
+			const u32 hash_pos = cracked[i].hash_pos;
+
+			if (md5_hashes->digests_shown[hash_pos] == 1) continue;
+
+			md5_hashes->digests_shown[hash_pos] = 1;
+
+			md5_hashes->digests_done++;
+
+			cpt_cracked++;
+
+			salt_buf->digests_done++;
+
+			if (salt_buf->digests_done == salt_buf->digests_cnt){
+				md5_hashes->salts_shown[salt_pos] = 1;
+
+				md5_hashes->salts_done++;
+			}
+			//check_hash( device_param, &cracked[i]);
+		}
+		free(cracked);
+	}
+}
+
 int runMD5(void) {
 	printf("started running\n");
+
+	print_clinfo();
+	return 0;
 
 	hashconfig_t* md5_hashconfig = (hashconfig_t *) calloc(1, sizeof(hashconfig_t));
 	hc_md5_device_param_t* md5_controller = (hc_md5_device_param_t *)calloc(1, sizeof(hc_md5_device_param_t));
@@ -345,33 +602,17 @@ int runMD5(void) {
 	hashes_t* md5_hashes = (hashes_t*)calloc(1, sizeof(hashes_t));
 
 	load_md5_hashconfig(md5_hashconfig);
+	setup_hashes(md5_hashconfig, md5_hashes);
+	bitmap_ctx_init(bitmap, md5_hashconfig, md5_hashes);
+	setup_device(md5_controller);
 
 	// Load the kernel source code into the array source_str
 	cl_int ret = build_program(md5_controller, "md5_crypt.cl");
-	set_sizes(md5_controller, bitmap, md5_hashconfig, md5_hashes);
+	if(ret != 0) printf("ret at %d is %s\n", __LINE__, getErrorString(ret));
+	set_controller_sizes(md5_controller, md5_hashconfig, md5_hashes);
 
-	set_device_args(md5_controller, bitmap);
-	
-	// Create the OpenCL kernel
-	md5_controller->kernel1 = clCreateKernel(md5_controller->program, "m00500_init", &ret);
-	printf("ret at %d is %s\n", __LINE__, getErrorString(ret));
-
-	md5_controller->kernel2 = clCreateKernel(md5_controller->program, "m00500_loop", &ret);
-	printf("ret at %d is %s\n", __LINE__, getErrorString(ret));
-
-	md5_controller->kernel3 = clCreateKernel(md5_controller->program, "m00500_comp", &ret);
-	printf("ret at %d is %s\n", __LINE__, getErrorString(ret));
-
-
-	// Set the arguments of the kernel
-	ret = set_kernel_args(md5_controller, &(md5_controller->kernel1));
-	printf("ret at %d is %s\n", __LINE__, getErrorString(ret));
-
-	ret = set_kernel_args(md5_controller, &(md5_controller->kernel2));
-	printf("ret at %d is %s\n", __LINE__, getErrorString(ret));
-
-	ret = set_kernel_args(md5_controller, &(md5_controller->kernel3));
-	printf("ret at %d is %s\n", __LINE__, getErrorString(ret));
+	load_controller_arg_array(md5_controller, bitmap);
+	create_kernels(md5_controller);	
 
 	printf("before execution\n");
 	// Execute the OpenCL kernel on the list
