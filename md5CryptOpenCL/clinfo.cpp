@@ -370,5 +370,4 @@ int print_clinfo()
 	}
 
 	free(platformList);
-	exit(0);
 }

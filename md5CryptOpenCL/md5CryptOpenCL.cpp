@@ -167,22 +167,53 @@ void load_md5_hashconfig(hashconfig_t * md5_hashconfig) {
 }
 
 void setup_device(hc_md5_device_param_t* md5_controller) {
-	cl_uint vector_width;
+	cl_uint vector_width = 1;
 	cl_int ret;
 
+	//get platform with device info
+	clGetPlatformIDs(0, NULL, &md5_controller->num_platforms);
+	printf("num_platforms = %d\n", md5_controller->num_platforms);
+	md5_controller->platforms = NULL;
+	md5_controller->platforms = (cl_platform_id*)malloc(md5_controller->num_platforms * sizeof(cl_platform_id));
+
+	ret = clGetPlatformIDs(md5_controller->num_platforms, md5_controller->platforms, NULL);
+	printf("ret at %d is %s\n", __LINE__, getErrorString(ret));
+
+	ret = clGetDeviceIDs(md5_controller->platforms[1], CL_DEVICE_TYPE_ALL, 1,
+		&md5_controller->device, &md5_controller->num_devices);
+	printf("ret at %d is %s\n", __LINE__, getErrorString(ret));
+	// Create an OpenCL context
+	md5_controller->context = clCreateContext(NULL, 1, &md5_controller->device, NULL, NULL, &ret);
+	printf("ret at %d is %s\n", __LINE__, getErrorString(ret));
+
+	// Create a command queue
+	md5_controller->command_queue = clCreateCommandQueue(md5_controller->context, md5_controller->device, 0, &ret);
+	printf("ret at %d is %s\n", __LINE__, getErrorString(ret));
+
 	//processors on the device
-	cl_uint device_processors;
+	cl_uint device_processors = 1;
 	ret = clGetDeviceInfo(md5_controller->device, CL_DEVICE_MAX_COMPUTE_UNITS, sizeof(device_processors), &device_processors, NULL);
+	if (ret != 0) printf("ret at %d is %s\n", __LINE__, getErrorString(ret));
 	md5_controller->device_processors = device_processors;
-	
+
 	//vector width of the device
-	ret = clGetDeviceInfo(md5_controller->device, CL_DEVICE_NATIVE_VECTOR_WIDTH_LONG, sizeof(vector_width), &vector_width, NULL);
+	ret = clGetDeviceInfo(md5_controller->device, CL_DEVICE_PREFERRED_VECTOR_WIDTH_INT, sizeof(vector_width), &vector_width, NULL);
 	if (ret != 0) printf("ret at %d is %s\n", __LINE__, getErrorString(ret));
 	if (vector_width > 16) vector_width = 16;
 	md5_controller->vector_width = vector_width;
 
+	//device_type
+	cl_device_type device_type;
+	ret = clGetDeviceInfo(md5_controller->device, CL_DEVICE_TYPE, sizeof(device_type), &device_type, NULL);
+	if (ret != 0) printf("ret at %d is %s\n", __LINE__, getErrorString(ret));
+	md5_controller->device_type = device_type;
+
 	md5_controller->kernel_accel_min = 1;
 	md5_controller->kernel_accel_max = 1024;
+
+	const u32 kernel_threads = 8;
+	md5_controller->kernel_threads_by_user = kernel_threads;
+	md5_controller->hardware_power = device_processors* kernel_threads;
 }
 
 int file_get_line(FILE *fp, char *line_buf){
@@ -228,10 +259,11 @@ void load_kernel_source(char* filename, char* source_str, size_t* source_size) {
 	printf("kernel loading done\n");
 }
 
-cl_int build_program(hc_md5_device_param_t* md5_controller, char* filename) {
+void build_program(hc_md5_device_param_t* md5_controller, char* filename) {
 	char build_opts[1024] = { 0 };
 	char *source_str = (char*)malloc(MAX_SOURCE_SIZE);
 	size_t source_size;
+	cl_int ret = 0;
 
 	//OpenCL includes argument
 	char pwd[MAX_PATH];
@@ -239,26 +271,6 @@ cl_int build_program(hc_md5_device_param_t* md5_controller, char* filename) {
 	printf("Working Directory is %s\n", pwd);
 
 	load_kernel_source(filename, source_str, &source_size);
-
-	//get platform with device info
-	cl_int ret = clGetPlatformIDs(0, NULL, &md5_controller->num_platforms);
-	//printf("num_platforms = %d\n", md5_controller->num_platforms);
-	md5_controller->platforms = NULL;
-	md5_controller->platforms = (cl_platform_id*)malloc(md5_controller->num_platforms * sizeof(cl_platform_id));
-
-	ret = clGetPlatformIDs(md5_controller->num_platforms, md5_controller->platforms, NULL);
-	printf("ret at %d is %s\n", __LINE__, getErrorString(ret));
-
-	ret = clGetDeviceIDs(md5_controller->platforms[1], CL_DEVICE_TYPE_ALL, 1,
-		&md5_controller->device, &md5_controller->num_devices);
-	printf("ret at %d is %s\n", __LINE__, getErrorString(ret));
-	// Create an OpenCL context
-	md5_controller->context = clCreateContext(NULL, 1, &md5_controller->device, NULL, NULL, &ret);
-	printf("ret at %d is %s\n", __LINE__, getErrorString(ret));
-
-	// Create a command queue
-	md5_controller->command_queue = clCreateCommandQueue(md5_controller->context, md5_controller->device, 0, &ret);
-	printf("ret at %d is %s\n", __LINE__, getErrorString(ret));
 
 	// Create a program from the kernel source
 	md5_controller->program = clCreateProgramWithSource(md5_controller->context, 1,
@@ -284,18 +296,18 @@ cl_int build_program(hc_md5_device_param_t* md5_controller, char* filename) {
 
 	free(source_str);
 	printf("done building program\n");
-	return 0;
 }
 
 void set_controller_sizes(hc_md5_device_param_t* md5_controller, hashconfig_t* md5_hashconfig, hashes_t* md5_hashes) {
-	md5_controller->size_pws = 4;
-	md5_controller->size_pws_amp = 4;
-	md5_controller->size_tmps = 4;
 	md5_controller->size_plains = (size_t)md5_hashes->digests_cnt * sizeof(plain_t);
 	md5_controller->size_salts = (size_t)md5_hashes->salts_cnt * sizeof(salt_t);
 	md5_controller->size_shown = (size_t)md5_hashes->digests_cnt * sizeof(u32);
 	md5_controller->size_digests = (size_t)md5_hashes->digests_cnt * (size_t)md5_hashconfig->dgst_size;
 	md5_controller->size_results = sizeof(u32);
+	md5_controller->size_pws = 4;
+	md5_controller->size_pws_amp = 4;
+	md5_controller->size_tmps = 4;
+	//TODO insert accelleration from opencl.c line 3900 or so
 }
 
 void setup_hashes(hashconfig_t* md5_hashconfig,hashes_t* md5_hashes) {
@@ -522,28 +534,40 @@ void run_kernel(hc_md5_device_param_t* md5_controller, const u32 kern_run, const
 	cl_ulong time_end;
 
 	ret = clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_START, sizeof(time_start), &time_start, NULL);// if (ret == -1) return -1;
-	if (ret != 0) printf("ret at %d is %s for kernel%d\n", __LINE__, getErrorString(ret), (int)kern_run);
+	//if (ret != 0) printf("ret at %d is %s for kernel%d\n", __LINE__, getErrorString(ret), (int)kern_run);
 
 	ret = clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_END, sizeof(time_end), &time_end, NULL);// if (ret == -1) return -1;
-	if (ret != 0) printf("ret at %d is %s for kernel%d\n", __LINE__, getErrorString(ret), (int)kern_run);
+	//if (ret != 0) printf("ret at %d is %s for kernel%d\n", __LINE__, getErrorString(ret), (int)kern_run);
 
 	const double exec_us = (double)(time_end - time_start) / 1000;
 
 	clReleaseEvent(event);
-	if (ret != 0) printf("ret at %d is %s for kernel%d\n", __LINE__, getErrorString(ret), (int)kern_run);
+	//if (ret != 0) printf("ret at %d is %s for kernel%d\n", __LINE__, getErrorString(ret), (int)kern_run);
 	clFinish(md5_controller->command_queue);
-	if (ret != 0) printf("ret at %d is %s for kernel%d\n", __LINE__, getErrorString(ret), (int)kern_run);
+	//if (ret != 0) printf("ret at %d is %s for kernel%d\n", __LINE__, getErrorString(ret), (int)kern_run);
 }
 
 void execute(hc_md5_device_param_t* md5_controller, hashes_t* md5_hashes) {
 	//I think this only works for 1 right now
 	cl_int ret = 0;
+	pw_t pw; memset(&pw, 0, sizeof(pw));
+
+	char *pw_ptr = (char *)&pw.i;
+
+	int pw_len = (int)strlen("$1$38652870$DUjsu4TTlTsOe/xxZ05uf/");
+
+	memcpy(pw_ptr, "$1$38652870$DUjsu4TTlTsOe/xxZ05uf/", pw_len);
+
+	pw.pw_len = pw_len;
+
+	ret = clEnqueueWriteBuffer(md5_controller->command_queue, md5_controller->d_pws_buf, CL_TRUE, 0, 1 * sizeof(pw_t), &pw, 0, NULL, NULL);
 
 	run_kernel(md5_controller, 1, 1);
 
 	u32 salt_pos = 0;
 	salt_t* salt_buf = &md5_hashes->salts_buf[salt_pos];
 	u32 iter = salt_buf->salt_iter;
+	//iter = 5;
 	const u32 loop_step = 1;
 
 	for (u32 loop_pos = 0; loop_pos < iter; loop_pos += loop_step) {
@@ -555,12 +579,13 @@ void execute(hc_md5_device_param_t* md5_controller, hashes_t* md5_hashes) {
 
 	run_kernel(md5_controller, 3, 1);
 
-	u32 num_cracked;
+	u32 num_cracked = 0;
 
 	ret = clEnqueueReadBuffer(md5_controller->command_queue, md5_controller->d_return_buf, CL_TRUE, 0, sizeof(u32), &num_cracked, 0, NULL, NULL);
 	if (ret != 0) printf("ret at %d is %s\n", __LINE__, getErrorString(ret));
 
 	if (num_cracked) {
+		printf("fuck yeah, cracked it");
 		plain_t* cracked = (plain_t*) calloc(num_cracked, sizeof(plain_t));
 		ret = clEnqueueReadBuffer(md5_controller->command_queue, md5_controller->d_plain_bufs, CL_TRUE, 0, num_cracked * sizeof(plain_t), cracked, 0, NULL, NULL);
 		u32 cpt_cracked = 0;
@@ -592,9 +617,11 @@ void execute(hc_md5_device_param_t* md5_controller, hashes_t* md5_hashes) {
 
 int runMD5(void) {
 	printf("started running\n");
+	cl_int ret = 0;
+	bool cleanup = true; //should alwas be true
 
-	print_clinfo();
-	return 0;
+	//print_clinfo();
+	//return 0;
 
 	hashconfig_t* md5_hashconfig = (hashconfig_t *) calloc(1, sizeof(hashconfig_t));
 	hc_md5_device_param_t* md5_controller = (hc_md5_device_param_t *)calloc(1, sizeof(hc_md5_device_param_t));
@@ -605,11 +632,12 @@ int runMD5(void) {
 	setup_hashes(md5_hashconfig, md5_hashes);
 	bitmap_ctx_init(bitmap, md5_hashconfig, md5_hashes);
 	setup_device(md5_controller);
+	set_controller_sizes(md5_controller, md5_hashconfig, md5_hashes);
 
 	// Load the kernel source code into the array source_str
-	cl_int ret = build_program(md5_controller, "md5_crypt.cl");
-	if(ret != 0) printf("ret at %d is %s\n", __LINE__, getErrorString(ret));
-	set_controller_sizes(md5_controller, md5_hashconfig, md5_hashes);
+	build_program(md5_controller, "md5_crypt.cl");
+
+	createBuffers(md5_controller, bitmap, md5_hashes);
 
 	load_controller_arg_array(md5_controller, bitmap);
 	create_kernels(md5_controller);	
@@ -619,6 +647,7 @@ int runMD5(void) {
 	//size_t global_item_size = LIST_SIZE; // Process the entire lists
 	//size_t local_item_size = 64; // Divide work items into groups of 64
 	//ret = clEnqueueNDRangeKernel(md5_controller->command_queue, kernel, 1, NULL,
+	execute(md5_controller, md5_hashes);
 	//	&global_item_size, &local_item_size, 0, NULL, NULL);
 	printf("after execution\n");
 	// Read the memory buffer C on the device to the local variable C
@@ -627,71 +656,73 @@ int runMD5(void) {
 	printf("after copying\n");
 	// Display the result to the screen
 
+	if (cleanup = true) {
+		// Clean up
+		ret = clFlush(md5_controller->command_queue);
+		ret = clFinish(md5_controller->command_queue);
+		if (md5_controller->d_pws_buf)        clReleaseMemObject(md5_controller->d_pws_buf);
+		if (md5_controller->d_pws_amp_buf)    clReleaseMemObject(md5_controller->d_pws_amp_buf);
+		if (md5_controller->d_bitmap_s1_a)    clReleaseMemObject(md5_controller->d_bitmap_s1_a);
+		if (md5_controller->d_bitmap_s1_b)    clReleaseMemObject(md5_controller->d_bitmap_s1_b);
+		if (md5_controller->d_bitmap_s1_c)    clReleaseMemObject(md5_controller->d_bitmap_s1_c);
+		if (md5_controller->d_bitmap_s1_d)    clReleaseMemObject(md5_controller->d_bitmap_s1_d);
+		if (md5_controller->d_bitmap_s2_a)    clReleaseMemObject(md5_controller->d_bitmap_s2_a);
+		if (md5_controller->d_bitmap_s2_b)    clReleaseMemObject(md5_controller->d_bitmap_s2_b);
+		if (md5_controller->d_bitmap_s2_c)    clReleaseMemObject(md5_controller->d_bitmap_s2_c);
+		if (md5_controller->d_bitmap_s2_d)    clReleaseMemObject(md5_controller->d_bitmap_s2_d);
+		if (md5_controller->d_plain_bufs)     clReleaseMemObject(md5_controller->d_plain_bufs);
+		if (md5_controller->d_digests_buf)    clReleaseMemObject(md5_controller->d_digests_buf);
+		if (md5_controller->d_hashes_shown)   clReleaseMemObject(md5_controller->d_hashes_shown);
+		if (md5_controller->d_salt_bufs)      clReleaseMemObject(md5_controller->d_salt_bufs);
+		if (md5_controller->d_tmps)           clReleaseMemObject(md5_controller->d_tmps);
+		if (md5_controller->d_return_buf)     clReleaseMemObject(md5_controller->d_return_buf);
 
-	// Clean up
-	ret = clFlush(md5_controller->command_queue);
-	ret = clFinish(md5_controller->command_queue);
-	if (md5_controller->d_pws_buf)        clReleaseMemObject(md5_controller->d_pws_buf);
-	if (md5_controller->d_pws_amp_buf)    clReleaseMemObject(md5_controller->d_pws_amp_buf);
-	if (md5_controller->d_bitmap_s1_a)    clReleaseMemObject(md5_controller->d_bitmap_s1_a);
-	if (md5_controller->d_bitmap_s1_b)    clReleaseMemObject(md5_controller->d_bitmap_s1_b);
-	if (md5_controller->d_bitmap_s1_c)    clReleaseMemObject(md5_controller->d_bitmap_s1_c);
-	if (md5_controller->d_bitmap_s1_d)    clReleaseMemObject(md5_controller->d_bitmap_s1_d);
-	if (md5_controller->d_bitmap_s2_a)    clReleaseMemObject(md5_controller->d_bitmap_s2_a);
-	if (md5_controller->d_bitmap_s2_b)    clReleaseMemObject(md5_controller->d_bitmap_s2_b);
-	if (md5_controller->d_bitmap_s2_c)    clReleaseMemObject(md5_controller->d_bitmap_s2_c);
-	if (md5_controller->d_bitmap_s2_d)    clReleaseMemObject(md5_controller->d_bitmap_s2_d);
-	if (md5_controller->d_plain_bufs)     clReleaseMemObject(md5_controller->d_plain_bufs);
-	if (md5_controller->d_digests_buf)    clReleaseMemObject(md5_controller->d_digests_buf);
-	if (md5_controller->d_hashes_shown)   clReleaseMemObject(md5_controller->d_hashes_shown);
-	if (md5_controller->d_salt_bufs)      clReleaseMemObject(md5_controller->d_salt_bufs);
-	if (md5_controller->d_tmps)           clReleaseMemObject(md5_controller->d_tmps);
-	if (md5_controller->d_return_buf)     clReleaseMemObject(md5_controller->d_return_buf);
-
-	if (md5_controller->kernel1)          clReleaseKernel(md5_controller->kernel1);
-	if (md5_controller->kernel2)          clReleaseKernel(md5_controller->kernel2);
-	if (md5_controller->kernel3)          clReleaseKernel(md5_controller->kernel3);
+		if (md5_controller->kernel1)          clReleaseKernel(md5_controller->kernel1);
+		if (md5_controller->kernel2)          clReleaseKernel(md5_controller->kernel2);
+		if (md5_controller->kernel3)          clReleaseKernel(md5_controller->kernel3);
 
 
-	if (md5_controller->program)          clReleaseProgram(md5_controller->program);
-	if (md5_controller->command_queue)    clReleaseCommandQueue(md5_controller->command_queue);
-	if (md5_controller->context)          clReleaseContext(md5_controller->context);
+		if (md5_controller->program)          clReleaseProgram(md5_controller->program);
+		if (md5_controller->command_queue)    clReleaseCommandQueue(md5_controller->command_queue);
+		if (md5_controller->context)          clReleaseContext(md5_controller->context);
 
-	md5_controller->pws_buf = NULL;
-	md5_controller->combs_buf = NULL;
-	md5_controller->hooks_buf = NULL;
+		md5_controller->pws_buf = NULL;
+		md5_controller->combs_buf = NULL;
+		md5_controller->hooks_buf = NULL;
 
-	md5_controller->d_pws_buf = NULL;
-	md5_controller->d_pws_amp_buf = NULL;
-	md5_controller->d_bitmap_s1_a = NULL;
-	md5_controller->d_bitmap_s1_b = NULL;
-	md5_controller->d_bitmap_s1_c = NULL;
-	md5_controller->d_bitmap_s1_d = NULL;
-	md5_controller->d_bitmap_s2_a = NULL;
-	md5_controller->d_bitmap_s2_b = NULL;
-	md5_controller->d_bitmap_s2_c = NULL;
-	md5_controller->d_bitmap_s2_d = NULL;
-	md5_controller->d_plain_bufs = NULL;
-	md5_controller->d_digests_buf = NULL;
-	md5_controller->d_hashes_shown = NULL;
-	md5_controller->d_salt_bufs = NULL;
-	md5_controller->d_tmps = NULL;
-	md5_controller->d_return_buf = NULL;
-	md5_controller->kernel1 = NULL;
-	md5_controller->kernel2 = NULL;
-	md5_controller->kernel3 = NULL;
-	md5_controller->program = NULL;
-	md5_controller->command_queue = NULL;
-	md5_controller->context = NULL;
-	
-	free(md5_hashes->hashes_buf->digest);
-	free(md5_hashes->hashes_buf->salt);
-	free(md5_hashes->hashes_buf);
-	free(md5_hashes);
-	free(bitmap);
-	free(md5_controller->platforms);
-	free(md5_hashconfig);
-	free(md5_controller);
+		md5_controller->d_pws_buf = NULL;
+		md5_controller->d_pws_amp_buf = NULL;
+		md5_controller->d_bitmap_s1_a = NULL;
+		md5_controller->d_bitmap_s1_b = NULL;
+		md5_controller->d_bitmap_s1_c = NULL;
+		md5_controller->d_bitmap_s1_d = NULL;
+		md5_controller->d_bitmap_s2_a = NULL;
+		md5_controller->d_bitmap_s2_b = NULL;
+		md5_controller->d_bitmap_s2_c = NULL;
+		md5_controller->d_bitmap_s2_d = NULL;
+		md5_controller->d_plain_bufs = NULL;
+		md5_controller->d_digests_buf = NULL;
+		md5_controller->d_hashes_shown = NULL;
+		md5_controller->d_salt_bufs = NULL;
+		md5_controller->d_tmps = NULL;
+		md5_controller->d_return_buf = NULL;
+		md5_controller->kernel1 = NULL;
+		md5_controller->kernel2 = NULL;
+		md5_controller->kernel3 = NULL;
+		md5_controller->program = NULL;
+		md5_controller->command_queue = NULL;
+		md5_controller->context = NULL;
+
+		free(md5_hashes->hashes_buf->digest);
+		free(md5_hashes->hashes_buf->salt);
+		free(md5_hashes->hashes_buf);
+		free(md5_hashes);
+		free(bitmap);
+		free(md5_controller->platforms);
+		free(md5_hashconfig);
+		free(md5_controller);
+		return 0;
+	}
 	return 0;
 }
 
